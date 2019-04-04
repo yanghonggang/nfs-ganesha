@@ -4,6 +4,7 @@ add_definitions(
 
 SET(fsalnewfs_LIB_SRCS
    main.c
+   internal.h
 )
 
 #message("RGW_INCLUDE_DIR ${RGW_INCLUDE_DIR}")
