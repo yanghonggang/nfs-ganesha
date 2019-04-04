@@ -45,6 +45,9 @@ Requires: openSUSE-release
 @BCOND_MEM@ mem
 %global use_fsal_mem %{on_off_switch mem}
 
+@BCOND_NEWFS@ newfs
+%global use_fsal_newfs %{on_off_switch newfs}
+
 @BCOND_GPFS@ gpfs
 %global use_fsal_gpfs %{on_off_switch gpfs}
 
@@ -312,6 +315,17 @@ This package contains a FSAL shared object to be used with NFS-Ganesha.  This
 is used for speed and latency testing.
 %endif
 
+# NEWFS
+%if %{with newfs}
+%package newfs
+Summary: The NFS-GANESHA Newfs backed testing FSAL
+Group: Applications/System
+Requires: nfs-ganesha = %{version}-%{release}
+
+%description newfs
+This package contains a FSAL shared object to be used with NFS-Ganesha.
+%endif
+
 # GPFS
 %if %{with gpfs}
 %package gpfs
@@ -478,6 +492,7 @@ cmake .	-DCMAKE_BUILD_TYPE=Debug			\
 	-DBUILD_CONFIG=rpmbuild				\
 	-DUSE_FSAL_NULL=%{use_fsal_null}		\
 	-DUSE_FSAL_MEM=%{use_fsal_mem}			\
+	-DUSE_FSAL_NEWFS=%{use_fsal_newfs}			\
 	-DUSE_FSAL_XFS=%{use_fsal_xfs}			\
 	-DUSE_FSAL_LUSTRE=%{use_fsal_lustre}			\
 	-DUSE_FSAL_CEPH=%{use_fsal_ceph}		\
@@ -723,6 +738,11 @@ exit 0
 %if %{with mem}
 %files mem
 %{_libdir}/ganesha/libfsalmem*
+%endif
+
+%if %{with newfs}
+%files newfs
+%{_libdir}/ganesha/libfsalnewfs*
 %endif
 
 %if %{with gpfs}
