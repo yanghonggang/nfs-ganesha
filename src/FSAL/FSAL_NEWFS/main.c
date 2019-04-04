@@ -13,9 +13,6 @@
 
 #include "internal.h"
 
-// 20KB
-#define NEWFS_MAX_FILE_SIZE	(20 << 20)
-
 /*
  *  The name of this module.
  */
@@ -37,6 +34,70 @@ struct newfs_fsal_module NewFS = {
 	}
 };
 
+static struct config_item export_params[] = {
+	CONF_ITEM_NOOP("name"),
+	CONF_ITEM_STR("user_id", 0, MAXUIDLEN, NULL, newfs_export, user_id),
+	CONF_ITEM_STR("secret_access_key", 0, MAXSECRETLEN, NULL, newfs_export,
+			secret_key),
+	CONF_ITEM_STR("cephf_conf", 0, MAXPATHLEN, NULL, newfs_export,
+			cephf_conf),
+	CONFIG_EOL
+};
+
+static struct config_block export_param_block = {
+	.dbus_interface_name = "org.ganesha.nfsd.config.fsal.newfs-export%d",
+	.blk_desc.name = "FSAL",
+	.blk_desc.type = CONFIG_BLOCK,
+	.blk_desc.u.blk.init = noop_conf_init,
+	.blk_desc.u.blk.params = export_params,
+	.blk_desc.u.blk.commit = noop_conf_commit
+}; 
+
+/**
+ * @brief Create a new export under this FSAL
+ *
+ * This function create a new export object for the newfs FSAL.
+ *
+ * @return FSAL status.
+ */
+static fsal_status_t create_export(struct fsal_module* fsal_hdl,
+				   void* parse_node,
+				   struct config_error_type* err_type,
+				   const struct fsal_up_vector* up_ops)
+{
+	fsal_status_t status = {ERR_FSAL_NO_ERROR, 0};
+
+	/* The internal export object */
+	struct newfs_export* export = gsh_calloc(1, sizeof(struct newfs_export));
+	/* The 'private' root handle */
+	struct newfs_handle* handle = NULL;
+	/* Return code */
+	int rc = 0;
+
+	/* TODO: fdb related init */
+	/* TODO: librados related init */
+
+	fsal_export_init(&export->export);
+	// TODO
+	//export_ops_init(&export->export.exp_ops);
+	// STOP HERE
+	handle = handle;
+	
+	/* get params for this export, if any */
+	if (parse_node) {
+		rc = load_config_from_node(parse_node,
+					   &export_param_block,
+					   export,
+					   true,
+					   err_type);
+		if (rc != 0) {
+			gsh_free(export);
+			return fsalstat(ERR_FSAL_INVAL, 0);
+		}
+        }
+	return status;
+}
+
 /**
  * @brief Initialize and register the FSAL
  *
@@ -55,6 +116,8 @@ MODULE_INIT void init(void)
 	}
 
 	/* override default module operations */
+	myself->m_ops.create_export = create_export;
+
 	// TODO
 	/* Initialize the fsal_obj_handle ops for FSAL NewFS */
 }
