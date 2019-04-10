@@ -43,9 +43,13 @@ struct newfs_export {
 	struct fsal_export export; /*< The public export object */
 	struct newfs_handle* root; /*< The root handle */
 
+	// FIXME: fdb related members
 	char* user_id; 		   /* cephx user_id for this mount */
 	char* secret_key;	   /* keyring path of ceph user */
 	char* cephf_conf;	   /* config file of the backend ceph cluster */
 };
+
+
+void deconstruct_handle(struct newfs_handle* obj);
 
 #endif
