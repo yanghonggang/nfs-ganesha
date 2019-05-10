@@ -46,14 +46,14 @@ static void release(struct fsal_export* export_pub)
  *
  * @return FSAL status.
  */
-static fsal_status_t lookup_path(struct fsal_export* export_pub,
-				 const char* path,
-				 struct fsal_obj_handle** pub_handle,
-				 struct attrlist* attrs_out)
-{
-	fsal_status_t status = { ERR_FSAL_NO_ERROR, 0 };
-	return status;
-}
+//static fsal_status_t lookup_path(struct fsal_export* export_pub,
+//				 const char* path,
+//				 struct fsal_obj_handle** pub_handle,
+//				 struct attrlist* attrs_out)
+//{
+//	fsal_status_t status = { ERR_FSAL_NO_ERROR, 0 };
+//	return status;
+//}
 
 /**
  * @brief Set operations for exports

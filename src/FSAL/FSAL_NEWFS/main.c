@@ -120,6 +120,7 @@ MODULE_INIT void init(void)
 
 	// TODO
 	/* Initialize the fsal_obj_handle ops for FSAL NewFS */
+	handle_ops_init(&NewFS.handle_ops);
 }
 
 /**

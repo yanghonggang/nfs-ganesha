@@ -5,6 +5,8 @@ add_definitions(
 SET(fsalnewfs_LIB_SRCS
    main.c
    export.c
+   handle.c
+   internal.c
    internal.h
 )
 

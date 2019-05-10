@@ -9,6 +9,8 @@
 #include <uuid/uuid.h>
 #include "FSAL/fsal_commonlib.h"
 
+#include "newfs/newfs_c.h"
+
 /* Max length of a ceph user_id string */
 #define	MAXUIDLEN	(64)
 
@@ -29,8 +31,10 @@ extern struct newfs_fsal_module NewFS;
 
 struct newfs_handle {
 	struct fsal_obj_handle handle;		/*< The public handle */
+        struct newfs_item *item;		/*< newfs-internal file/dir
+                                                    item*/
 	const struct fsal_up_vector* up_ops;	/*< FIXME */
-	struct fsal_share share;		/*< FIXME */
+	struct fsal_share share;		/*< ref: newfs_fsal_merge */
 
 	struct newfs_export* export;		/*< The first export this handle
 						 *< belongs to */
@@ -41,6 +45,8 @@ struct newfs_handle {
  */
 struct newfs_export {
 	struct fsal_export export; /*< The public export object */
+	struct newfs_info *newfs_info; /*< The info used to access all newfs
+                                         methods on this export */
 	struct newfs_handle* root; /*< The root handle */
 
 	// FIXME: fdb related members
@@ -50,6 +56,11 @@ struct newfs_export {
 };
 
 
+fsal_status_t newfs2fsal_error(const int newfs_errorcode);
+int construct_handle(struct newfs_export *export, struct newfs_item *item,
+                     struct stat *st, struct newfs_handle **obj);
 void deconstruct_handle(struct newfs_handle* obj);
+
+void handle_ops_init(struct fsal_obj_ops *ops);
 
 #endif
