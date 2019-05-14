@@ -198,7 +198,7 @@ static fsal_status_t newfs_fsal_mkdir(struct fsal_obj_handle *dir_hdl,
  * @return FSAL status.
  */
 static fsal_status_t newfs_fsal_readdir(struct fsal_obj_handle *dir_hdl,
-                       fsal_cookie_t *whence, void *cb_arg,
+                       fsal_cookie_t *whence, void *dir_state,
                        fsal_readdir_cb cb, attrmask_t attrmask, bool *eof)
 {
   int rc = -1;
@@ -215,11 +215,565 @@ static fsal_status_t newfs_fsal_readdir(struct fsal_obj_handle *dir_hdl,
     start = *whence;
   }
   // FIXME: newfs_opendir() ????
-
+  //        we need a newfs_opendir() or we cannot make sure dir's entries
+  //        stay the same as the first time newfs_readir()
   while (!(*eof)) {
+    struct newfs_item *item = NULL;
+    struct stat st;
+    struct dirent de;
+    rc = newfs_readdir(export->newfs_info, dir->item, &de, start, &item, &st);
+    if (rc < 0) {
+      fsal_status = newfs2fsal_error(rc);
+      break;
+    } else if (rc == 1) {
+      struct newfs_handle *obj = NULL;
+      struct attrlist attrs;
+      enum fsal_dir_result cb_rc;
+
+      // FIXME: how to handle . and ..
+      rc = construct_handle(export, item, &st, &obj);
+      if (rc < 0) {
+        fsal_status = newfs2fsal_error(rc);
+        break;
+      }
+
+      fsal_prepare_attrs(&attrs, attrmask);
+      posix2fsal_attributes_all(&st, &attrs);
+      // TODO: security labels support
+      // rc = newfs_fsal_get_sec_label(obj, &attrs);
+      // if (rc < 0) {
+      //   fsal_status = newfs2fsal_error(rc);
+      //   break;
+      // }
+      cb_rc = cb(de.d_name, &obj->handle, &attrs, dir_state, de.d_off);
+      fsal_release_attrs(&attrs);
+      if (cb_rc >= DIR_READAHEAD) {
+        /* Read ahead not supported by this FSAL. */
+        break;
+      }
+      start ++; /* next entry */
+    } else if (rc == 0) {
+      *eof = true;
+    } else {
+      /* Can't happend */
+      abort();
+    }
   }
  
   return fsal_status;
+}
+
+/**
+ * @brief Freshen and return attributes
+ *
+ * This function freshens and returns the attributes of the given file.
+ *
+ * @param[in] obj_hdl Object to interrogate
+ *
+ * @return FSAL status
+ *
+ */
+static fsal_status_t newfs_fsal_getattrs(struct fsal_obj_handle *obj_hdl,
+                                         struct attrlist *attrs)
+{
+  int rc = -1;
+  struct stat st;
+
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+  struct newfs_handle *handle = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+
+  LogFullDebug(COMPONENT_FSAL, "%s enter obj_hdl %p", __func__, obj_hdl);
+
+  rc = newfs_getattr(export->newfs_info, handle->item, &st);
+  if (rc < 0) {
+    if (attrs->request_mask & ATTR_RDATTR_ERR) {
+      /* Caller asked for error to be visible */
+      attrs->valid_mask = ATTR_RDATTR_ERR;
+    }
+    return newfs2fsal_error(rc);
+  }
+
+  posix2fsal_attributes_all(&st, attrs);
+
+  return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+/**
+ * @brief Rename a file
+ *
+ * This function renames a file, possible moving it into another directory.
+ * We assume most checks are done by the caller.
+ *
+ * @param[in]	olddir_hdl	Source directory
+ * @param[in]	old_name	Original name
+ * @param[in]	newdir_hdl	Destination directory
+ * @param[in]	new_name	New name
+ *
+ * @return FSAL status.
+ */
+static fsal_status_t newfs_fsal_rename(struct fsal_obj_handle *obj_hdl,
+                                       struct fsal_obj_handle *olddir_hdl,
+                                       const char *old_name,
+                                       struct fsal_obj_handle *newdir_hdl,
+                                       const char *new_name)
+{
+  int rc = -1;
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+  struct newfs_handle *olddir = container_of(olddir_hdl, struct newfs_handle,
+                                             handle);
+  struct newfs_handle *newdir = container_of(newdir_hdl, struct newfs_handle,
+                                             handle);
+
+  LogFullDebug(COMPONENT_FSAL, "%s enter obj_hdl %p olddir_hdl %p oname %s"
+               " newdir_hdl %p nname %s", __func__, obj_hdl, olddir_hdl,
+               new_name, newdir_hdl, new_name);
+
+  rc = newfs_rename(export->newfs_info, olddir->item, old_name, newdir->item,
+                    new_name);
+  if (rc < 0) {
+    /*
+     * RFC5661, section 18.26.3 - renaming on top of a non-empty direcotry
+     * should return NFS4ERR_EXIST. pg474
+     */
+    if (rc == -ENOTEMPTY)
+      rc = -EEXIST;
+    return newfs2fsal_error(rc);
+  }
+
+  return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+/**
+ * @brief Remove a name
+ *
+ * This function removes a name from the filesytem and possibly deletes the
+ * associated file. Directories must be empty to be removed.
+ *
+ * @param[in]	dir_hdl	The directory from which to remove the name
+ * @param[in]	obj_hdl	The object being removed
+ * @param[in]	name	The name to remove
+ *
+ * @return FSAL status.
+ */
+
+static fsal_status_t newfs_fsal_unlink(struct fsal_obj_handle *dir_hdl,
+                                       struct fsal_obj_handle *obj_hdl,
+                                       const char *name)
+{
+  int rc = -1;
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+  struct newfs_handle *dir = container_of(dir_hdl, struct newfs_handle, handle);
+
+  LogFullDebug(COMPONENT_FSAL, "Unlink %s, type %s", name,
+               object_file_type_to_str(obj_hdl->type));
+
+  if (obj_hdl->type != DIRECTORY) {
+    rc = newfs_unlink(export->newfs_info, dir->item, name);
+  } else {
+    rc = newfs_rmdir(export->newfs_info, dir->item, name);
+  }
+  if (rc < 0) {
+    LogDebug(COMPONENT_FSAL, "Unlink %s returned %s (%d)", name, strerror(-rc),
+             -rc);
+    return newfs2fsal_error(rc);
+  }
+
+  return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+/**
+ * @brief Open a newfs_fd
+ *
+ * @param[in] myself		The newfs internal object handle
+ * @param[in] openflags		Mode for open
+ * @param[in] posix_flags	POSIX open flags for open
+ *
+ * @return FSAL status.
+ */
+
+static fsal_status_t newfs_open_my_fd(struct newfs_handle *myself,
+                                      fsal_openflags_t openflags,
+                                      int posix_flags, struct newfs_fd *my_fd)
+{
+  int rc = -1;
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+
+  LogFullDebug(COMPONENT_FSAL,
+               "my_fd = %p my_fd->fd = %p openflags = %x, posix_flags = %x",
+               my_fd, my_fd->fd, openflags, posix_flags);
+
+  assert(my_fd->fd == NULL
+         && my_fd->openflags == FSAL_O_CLOSED && openflags != 0);
+
+  LogFullDebug(COMPONENT_FSAL,
+               "openflags = %x, posix_flags = %x",
+               openflags, posix_flags);
+  rc = newfs_open(export->newfs_info, myself->item, posix_flags,
+                  &my_fd->fd);
+  if (rc < 0) {
+    my_fd->fd = NULL;
+    LogFullDebug(COMPONENT_FSAL,
+                 "open failed with %s",
+                 strerror(-rc));
+    return newfs2fsal_error(rc);
+  }
+
+  /* Save the file descriptor, make sure we only save the
+   * open modes that actually represent the open file.
+   */
+  LogFullDebug(COMPONENT_FSAL,
+               "fd = %p, new openflags = %x",
+               my_fd->fd, openflags);
+
+  my_fd->openflags = openflags;
+
+  return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+static fsal_status_t newfs_close_my_fd(struct newfs_handle *handle,
+                                       struct newfs_fd *my_fd)
+{
+  int rc = -1;
+  fsal_status_t status = fsalstat(ERR_FSAL_NO_ERROR, 0);
+
+  if (my_fd->fd != NULL && my_fd->openflags != FSAL_O_CLOSED) {
+    rc = newfs_close(handle->export->newfs_info, my_fd->fd);
+    if (rc < 0)
+      status = newfs2fsal_error(rc);
+    my_fd->fd = NULL;
+    my_fd->openflags = FSAL_O_CLOSED;
+  }
+  return status;
+}
+
+/**
+ * @brief Open a file descriptor for read or write and possibly create
+ *
+ * This function opens a file for read or write, possibly creating it.
+ * If the caller is passing a state, it must hold the state_lock 
+ * execlusive.
+ *
+ * stat can be NULL which indicates a stateless open (such as via the
+ * NFS v3 CREATE operation), in which case the FSAL must assure protection
+ * of any resources. If the file being created, such protection is
+ * simple since no one else will have access to the object yet, however,
+ * in the case of an exclusive create, the common resources may still need
+ * protection.
+ *
+ * If Name is NULL, obj_hdl is the file itself, otherwise obj_hdl is the 
+ * parent directory.
+ *
+ * On an exclusive create, the upper layer may know the object handle
+ * already, so it MAY call with name == NULL. In this case, the caller
+ * expectes just to check the verifier.
+ *
+ * On a call with an existing object handle for an UNCHECKED create,
+ * we can set the size to 0.
+ *
+ * If attributes are not set on create, the FSAL will set some minimal
+ * attributes (for example, mode might be set to 0600).
+ *
+ * If an open by name success and did not result in Ganesha creating a file,
+ * the caller will need to do subsequent permission check to confirm the
+ * open. This is becuase the permission attributes were not available
+ * beforehand.
+ *
+ * @param[in] obj_hdl	 		File to open or parent directory
+ * @param[in,out] state	 		state_t to use for this operation
+ * @param[in] openflags	 		Mode for open
+ * @param[in] ceatemode	 		Mode for create
+ * @param[in] name	 		Name for file if being created or opened
+ * @param[in] attrib_set 		Attributes to set on created file
+ * @param[in] verifier	 		Verifier to use for exclusive create
+ * @param[in,out] new_obj		Newly created object
+ * @param[in,out] caller_perm_check     The caller must do a permission check
+ *
+ * @return FSAL status.
+ */
+fsal_status_t newfs_fsal_open2(struct fsal_obj_handle *obj_hdl,
+                               struct state_t *state,
+                               fsal_openflags_t openflags,
+                               enum fsal_create_mode createmode,
+                               const char *name,
+                               struct attrlist *attrib_set,
+                               fsal_verifier_t verifier,
+                               struct fsal_obj_handle **new_obj,
+                               struct attrlist *attrs_out,
+                               bool *caller_perm_check)
+{
+  fsal_status_t status = { ERR_FSAL_NO_ERROR, 0 };
+  int rc = -1;
+  struct newfs_fd *my_fd = NULL;
+  struct stat st;
+  bool truncated = false;
+  bool created = false;
+  bool setattrs = attrib_set != NULL;
+  mode_t unix_mode = 0;
+  int posix_flags = 0;
+
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                  struct newfs_export, export);
+  Fh *fd = NULL;
+  struct newfs_item *item = NULL;
+  struct newfs_handle *obj = NULL;
+
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+
+  LogFullDebug(COMPONENT_FSAL, "%s enter obj_hdl %p", __func__, obj_hdl);
+
+  if (state != NULL) {
+    my_fd = &container_of(state, struct newfs_state_fd, state)->newfs_fd;
+  }
+
+  if (setattrs) {
+    LogAttrlist(COMPONENT_FSAL, NIV_FULL_DEBUG, "attrs ", attrib_set, false);
+  }
+
+  fsal2posix_openflags(openflags, &posix_flags);
+  truncated = (posix_flags & O_TRUNC) != 0;
+
+  if (createmode >= FSAL_EXCLUSIVE) {
+    /* Now fixup attrs for verifier if exclusive create */
+    set_common_verifier(attrib_set, verifier); 
+  }
+
+  /* obj_hdl is the file itself */
+  if (name == NULL) {
+    /* This is an open by handle */
+    if (state != NULL) {
+      /* Prepare to take the share reservation, but only if we
+       * are called with a valid state (if state is NULL the
+       * caller is a stateless create such as NFS v3 CREATE).
+       */
+
+      /* This can block over an I/O operation. */
+      PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
+      /* Check share reservation conflicts. */
+      status = check_share_conflict(&myself->share,
+                                    openflags, false);
+
+      if (FSAL_IS_ERROR(status)) {
+        PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+        return status;
+      }
+
+      /* Take the share reservation now by updating the
+       * counters.
+       */
+      update_share_counters(&myself->share, FSAL_O_CLOSED,
+                            openflags);
+
+      PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+    } else {
+      /* We need to use the global fd to continue, and take  
+       * the lock to protect it.
+       */
+      my_fd = &myself->fd;
+      PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
+    }
+
+    if (my_fd->openflags != FSAL_O_CLOSED) {
+      newfs_close_my_fd(myself, my_fd);
+    }
+    status = newfs_open_my_fd(myself, openflags, posix_flags, my_fd);
+
+  } /* !name */
+
+  /*
+   * In this path where we are opening by name, we can't check share
+   * reservation yet since we don't hava an object_handle yet. If we
+   * indeed create the object handle (there is no race with another
+   * open by name), then there CAN NOT be a share conflict, otherwise
+   * the share conflict will be resolved when the object handles are
+   * mergeed.
+   */
+  if (createmode == FSAL_NO_CREATE) {
+    /* Non creation case, newfs doesn't have open by name so we
+     * have to do a lookup and then handle as an open by handle.
+     * FIXME: newfs add a open by name interface???
+     */
+    struct fsal_obj_handle *temp = NULL;
+
+    /* We don't have open by name... */
+    status = obj_hdl->obj_ops->lookup(obj_hdl, name, &temp, NULL);
+
+    if (FSAL_IS_ERROR(status)) {
+      LogFullDebug(COMPONENT_FSAL, "lookup returned %s", fsal_err_txt(status));
+      return status;
+    }
+
+    /* Now call ourselves without name and attributes to open */
+    status = obj_hdl->obj_ops->open2(temp, state, openflags,
+                                     FSAL_NO_CREATE, NULL, NULL,
+                                     verifier, new_obj,
+                                     attrs_out,
+                                     caller_perm_check);
+
+    if (FSAL_IS_ERROR(status)) {
+      /* Release the object we found by lookup. */
+      temp->obj_ops->release(temp);
+      LogFullDebug(COMPONENT_FSAL, "open returned %s", fsal_err_txt(status));
+    }
+
+    return status;
+  } /* == FSAL_NO_CREATE */
+
+  /*
+   * Now add in O_CREAT and O_EXCL.
+   * Even with FSAL_UNGUARDED we try exclusive create first so
+   * we can safely set attributes.
+   */
+  if (createmode != FSAL_NO_CREATE) {
+    /* Now add in O_CREAT and O_EXCL. */
+    posix_flags |= O_CREAT;
+
+    /* And if we are at least FSAL_GUARDED, do an O_EXCL create. */
+    if (createmode >= FSAL_GUARDED)
+      posix_flags |= O_EXCL;
+
+    /* Fetch the mode attribute to use in the openat system call. */
+    unix_mode = fsal2unix_mode(attrib_set->mode) &
+                  ~op_ctx->fsal_export->exp_ops.fs_umask(op_ctx->fsal_export);
+
+    /* Don't set the mode if we later set the attributes */
+    FSAL_UNSET_MASK(attrib_set->valid_mask, ATTR_MODE);
+  } /* != FSAL_NO_CREATE*/
+
+  /*
+   * If we have FSAL_UNCHECKED and want to set more attributes
+   * than the mode, we attempt an O_EXCL create first, if that
+   * success, then we will be allowed to set the additional
+   * attributes, otherwise, we don't know we created the file
+   * and this can NOT set the attributes. 
+   */ 
+  if (createmode == FSAL_UNCHECKED && (attrib_set->valid_mask != 0)) {
+    posix_flags |= O_EXCL;
+  }
+
+  memset(&st, 0, sizeof(struct stat));
+
+  st.st_uid = op_ctx->creds->caller_uid;
+  st.st_gid = op_ctx->creds->caller_gid;
+  st.st_mode = unix_mode;
+
+  /* myself->item => parent item */
+  rc = newfs_create(export->newfs_info, myself->item, name, &st, &fd, &item,
+                    posix_flags);
+  if (rc < 0) {
+    LogFullDebug(COMPONENT_FSAL, "Create %s failed with %s", name,
+                 strerror(-rc));
+  }
+
+  if (rc == -EEXIST && createmode == FSAL_UNCHECKED) {
+    /* We tried to create O_EXCL to set attributes and failed.
+     * Remove O_EXCL and retry, also remember not to set attributes.
+     * We still try O_CREATE again just in case file disappears out
+     * from under us.
+     *
+     * Note that because we have dropped O_EXCL, later on we will
+     * not assume we created the file, and thus will not set
+     * additional attributes. We don't need to separately track
+     * the condition of not wanting to set attributes.
+     */
+     posix_flags &= ~O_EXCL;
+     rc = newfs_create(export->newfs_info, myself->item, name, &st, &fd, &item,
+                       posix_flags);
+     if (rc < 0) {
+       LogFullDebug(COMPONENT_FSAL, "Non-exclusive Create %s failed with %s",
+                    name, strerror(-rc));
+     }
+  }
+  if (rc < 0) {
+    return newfs2fsal_error(rc);
+  }
+
+  /* Remember if we were responsible for creating the file.
+   * Note that in an UNCHECKED retry we MIGHT have re-created the
+   * file and won't remember that. Oh well, so in that rare case we
+   * leak a partially created file if we have a subsequent error in here. 
+   */
+  created = (posix_flags & O_EXCL) != 0;
+  *caller_perm_check = false;
+
+  construct_handle(export, item, &st, &obj);
+
+  /* If we didn't have a state above, use the global fd. At this point,
+   * since we just created the global fd, no one else can have a
+   * reference to it, and thus we can manipulate unlocked which is
+   * handy since we can then call setattr2 which WILL take the lock
+   * without a double locking deadlock. 
+   */
+  if (my_fd == NULL)
+    my_fd = &obj->fd;
+
+  my_fd->fd = fd;
+  my_fd->openflags = openflags;
+
+  *new_obj = &obj->handle;
+
+  if (created && setattrs && attrib_set->valid_mask != 0) {
+    /*
+     * Set attributes using our newly opened file descriptor as the
+     * share_fd if there are any left to set(mode and truncate
+     * have already been handled).
+     *
+     * Note that we only set the attributes if we were responsible
+     * for creating the file and we have attributes to set.
+     */
+    status = (*new_obj)->obj_ops->setattr2(*new_obj,
+                                           false,
+                                           state,
+                                           attrib_set);
+    if (FSAL_IS_ERROR(status))
+      goto fileerr;
+
+    if (attrs_out != NULL) {
+      status = (*new_obj)->obj_ops->getattrs(*new_obj,
+                                             attrs_out);
+      if (FSAL_IS_ERROR(status) &&
+          (attrs_out->request_mask & ATTR_RDATTR_ERR) == 0) {
+        /* Get attributes failed and caller expected
+         * to get the attributes. Otherwise continue
+         * with attrs_Out indicating ATTR_RDATTR_ERR.
+         */
+        goto fileerr;
+      }
+    }
+  } else if (attrs_out != NULL) {
+    /* Since we haven't set any attributes other than what was set
+     * on create (if we event created), just use the stat results
+     * we used to create the fsal_obj_handle.
+     */
+    posix2fsal_attributes_all(&st, attrs_out);
+  }
+
+  if (state != NULL) {
+    /* Prepare to take the share reservation, but only if we are
+     * called with a valid state (if state is NULL
+     */
+
+    /* This can block over an I/O operation. */
+    PTHREAD_RWLOCK_wrlock(&(*new_obj)->obj_lock);
+
+    /* Take the share reservation now by updating the counters. */
+    update_share_counters(&obj->share, FSAL_O_CLOSED, openflags);
+
+    PTHREAD_RWLOCK_unlock(&(*new_obj)->obj_lock);
+  }
+
+  return fsalstat(ERR_FSAL_NO_ERROR, 0);
+
+fileerr:
+
+  /* Close the file we just opened. */
+  // TODO
+  return status;
 }
 
 /**
@@ -240,4 +794,8 @@ void handle_ops_init(struct fsal_obj_ops *ops)
   ops->merge = newfs_fsal_merge;
   ops->mkdir = newfs_fsal_mkdir;
   ops->readdir = newfs_fsal_readdir;
+  ops->getattrs = newfs_fsal_getattrs;
+  ops->rename = newfs_fsal_rename;
+  ops->unlink = newfs_fsal_unlink;
+  ops->open2 = newfs_fsal_open2;
 }

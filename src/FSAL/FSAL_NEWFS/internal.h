@@ -29,8 +29,23 @@ struct newfs_fsal_module {
 };
 extern struct newfs_fsal_module NewFS;
 
+struct newfs_fd {
+  /* The open and share mode etc. */
+  fsal_openflags_t openflags;
+  /* rw lock to protect the file descriptor */
+  pthread_rwlock_t fdlock;
+  /* The newfs file descriptor. */
+  Fh *fd;
+};
+
+struct newfs_state_fd {
+  struct state_t state;
+  struct newfs_fd newfs_fd;
+};
+
 struct newfs_handle {
 	struct fsal_obj_handle handle;		/*< The public handle */
+        struct newfs_fd fd;
         struct newfs_item *item;		/*< newfs-internal file/dir
                                                     item*/
 	const struct fsal_up_vector* up_ops;	/*< FIXME */
