@@ -868,6 +868,278 @@ fileerr:
 }
 
 /**
+ * @Brief Re-open a file that may be already opened
+ *
+ * This function supports changing the access mode of a share reservation and
+ * thus should only be called with a share state. This state_lock must be held.
+ *
+ * This MAY be used to open a file the first time if there is no need for
+ * open by name or create semantics. One example would be 9P lopen
+ *
+ * @param[in] obj_hdl	File on which to operate
+ * @param[in] state	state_t to use for this operation
+ * @param[in] openflags	Mode for re-open
+ *
+ * @return FSAL status.
+ */
+
+static fsal_status_t newfs_fsal_reopen2(struct fsal_obj_handle *obj_hdl,
+                                        struct state_t *state,
+                                        fsal_openflags_t openflags)
+{
+  fsal_status_t status = {0, 0};
+  int posix_flags = 0;
+  fsal_openflags_t old_openflags;
+
+  struct newfs_fd *my_share_fd = NULL;
+  struct newfs_fd temp_fd = {FSAL_O_CLOSED, PTHREAD_RWLOCK_INITIALIZER, NULL};
+  struct newfs_fd *my_fd = &temp_fd;
+
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  my_share_fd = &container_of(state, struct newfs_state_fd,
+                              state)->newfs_fd;
+
+  LogFullDebug(COMPONENT_FSAL, "%s enter obj_hdl %p", __func__, obj_hdl);
+
+  fsal2posix_openflags(openflags, &posix_flags);
+
+  /* This can block over an I/O operation. */
+  PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
+
+  old_openflags = my_share_fd->openflags;
+
+  /* We can conflict with old share, so go ahead and check now. */
+  status = check_share_conflict(&myself->share, openflags, false);
+
+  if (FSAL_IS_ERROR(status)) {
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+    return status;
+  }
+
+  /* Set up the new share so we can drop the lock and not have a
+   * conflicting share be asserted, updating the share conters.
+   */
+  update_share_counters(&myself->share, old_openflags, openflags);
+
+  PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+  status = newfs_open_my_fd(myself, openflags, posix_flags, my_fd);
+
+  if (FSAL_IS_ERROR(status)) {
+    /* Close the existing file descriptor and copy the new
+     * one over. Make sure on one is using the fd that we are
+     * about to close!
+     */
+    PTHREAD_RWLOCK_wrlock(&my_share_fd->fdlock);
+
+    newfs_close_my_fd(myself, my_share_fd);
+    my_share_fd->fd = my_fd->fd;
+    my_share_fd->openflags = my_fd->openflags;
+
+    PTHREAD_RWLOCK_unlock(&my_share_fd->fdlock);
+  } else {
+    /* We had a failure on open - we need to revert the share.
+     * This can block over an I/O operation.
+     */
+    PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
+
+    update_share_counters(&myself->share, openflags, old_openflags);
+
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+  }
+
+  return status;
+}
+
+/**
+ * @Brief Manage closing a file when a state is no longer needed.
+ *
+ * When the upper layers are ready to dispense with a state, this method is
+ * called to allow the FSAL to close any file descriptors or release any other
+ * resources associated with the state. A call to free_state should be assumed
+ * to follow soon.
+ *
+ * @param[in] obj_hdl	File on which to operate
+ * @param[in] state	state_t to use for this operation
+ *
+ * @reurn FSAL status.
+ */
+static fsal_status_t newfs_fsal_close2(struct fsal_obj_handle *obj_hdl,
+                                      struct state_t *state)
+{
+  fsal_status_t status = {0, 0};
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  struct newfs_fd *my_fd = &container_of(state, struct newfs_state_fd,
+                                             state)->newfs_fd;
+
+  if (state) {
+    if (state->state_type == STATE_TYPE_SHARE ||
+        state->state_type == STATE_TYPE_NLM_SHARE ||
+        state->state_type == STATE_TYPE_9P_FID) {
+      /* Tihs is a share state, we must update the share conters */
+
+      /* This can block over an I/O operation */
+      PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
+
+      update_share_counters(&myself->share,
+                            my_fd->openflags,
+                            FSAL_O_CLOSED);
+
+      PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+    }
+  } else if (my_fd->openflags == FSAL_O_CLOSED) {
+    return fsalstat(ERR_FSAL_NOT_OPENED, 0);
+  }
+
+  /* Acquire state's fdlock to make sure no other thread
+   * is operating on the fd while we close it.
+   */
+  PTHREAD_RWLOCK_wrlock(&my_fd->fdlock);
+  status = newfs_close_my_fd(myself, my_fd);
+  PTHREAD_RWLOCK_unlock(&my_fd->fdlock);
+
+  return status;
+}
+
+/**
+ * @brief Return open status of a state.
+ *
+ * This function returns open flags representing the current open
+ * status for a state. This state_lock must be held.
+ *
+ * @param[in] obj_hdl	File on which to operate
+ * @param[in] state	File state to interrogate
+ *
+ * @retval Flags representing current open status
+ */
+
+static fsal_openflags_t newfs_fsal_status2(struct fsal_obj_handle *obj_hdl,
+                                           struct state_t *state)
+{
+  struct newfs_fd *my_fd = &container_of(state, struct newfs_state_fd,
+                                             state)->newfs_fd;
+
+  return my_fd->openflags;
+}
+
+/**
+ * @brief Function to open an fsal_obj_handle's global file descriptor.
+ *
+ * @param[in]	obj_hdl		File on which to operate
+ * @param[in]	openflags	Mode for open
+ * @param[out]	fd		File descriptor that is to be used
+ *
+ * return FSAL status.
+ */
+static fsal_status_t newfs_open_func(struct fsal_obj_handle *obj_hdl,
+                                     fsal_openflags_t openflags,
+                                     struct fsal_fd *fd)
+{
+  int posix_flags = 0;
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+
+
+  fsal2posix_openflags(openflags, &posix_flags);
+
+  return newfs_open_my_fd(myself, openflags, posix_flags,
+                          (struct newfs_fd *)fd);
+}
+
+/**
+ * @brief Function to close an fsal_obj_handle's global file descriptor.
+ *
+ * @param[in]	obj_hdl	File on which to operate
+ * @param[in]	fd	File handle to close
+ *
+ * @return FSAL status.
+ */
+static fsal_status_t newfs_close_func(struct fsal_obj_handle *obj_hdl,
+                                      struct fsal_fd *fd)
+{
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+
+  return newfs_close_my_fd(myself, (struct newfs_fd *)fd);
+}
+
+/**
+ * @brief Find a file descriptor for a read or write operation.
+ * 
+ * @param[in]	obj_hdl		File on which to operate
+ * @param[in]	bypass		If state doesn't indicate a share reservation,
+ *                              bypass any deny read
+ * @param[in]	state		state_t to use for this operation
+ * @param[in]	openflags	Mode for open
+ * @param[in]	open_func	Function to open a file descriptor
+ * @param[out]	has_lock	Indicates that obj_hdl->obj_lock is held read
+ * @param[out]	closefd		Indicates that file descriptor must be closed
+ * @param[in]	open_for_locks	Indicates file is open for locks
+ *
+ * We do not need file descriptors for non-regular files, so this never has to
+ * handle them.
+ */
+static fsal_status_t newfs_find_fd(Fh **fd,
+                                   struct fsal_obj_handle *obj_hdl,
+                                   bool bypass,
+                                   struct state_t *state,
+                                   fsal_openflags_t openflags,
+                                   bool *has_lock,
+                                   bool *closedfd,
+                                   bool open_for_locks)
+{
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  struct newfs_fd temp_fd = {FSAL_O_CLOSED, PTHREAD_RWLOCK_INITIALIZER, NULL};
+  struct newfs_fd *out_fd = &temp_fd;
+  fsal_status_t status = {ERR_FSAL_NO_ERROR, 0};
+  bool reusing_open_state_fd = false;
+
+  status = fsal_find_fd((struct fsal_fd **)&out_fd, obj_hdl,
+                        (struct fsal_fd *)&myself->fd, &myself->share,
+                        bypass, state, openflags,
+                        newfs_open_func, newfs_close_func,
+                        has_lock, closedfd, open_for_locks,
+                        &reusing_open_state_fd);
+
+  LogFullDebug(COMPONENT_FSAL, "fd = %p", out_fd->fd);
+
+  *fd = out_fd->fd;
+  return status;
+}
+
+/**
+ * @brief Read data from a file
+ *
+ * This function reads data from the given file. The FSAL must be able to
+ * perform the read whether a state is presented or not. This function also
+ * is expected to handle properly bypassing or not share reservations. This is
+ * an (optionally) aysnchronous call. When the I/O is complete, the done
+ * callback is called with the results.
+ *
+ * @param[in]	obj_hdl		File on which to operate
+ * @param[in]	bypass		If state doesn't indicate a share reservation,
+ *                              bypass any deny read
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] read_arg	Info about read, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
+ *
+ * @return Nothing; results are in callback
+ */
+static void newfs_fsal_read2(struct fsal_obj_handle *obj_hdl,
+                             bool bypass,
+                             fsal_async_cb done_cb,
+                             struct fsal_io_arg *read_arg,
+                             void *caller_arg)
+{
+  fsal_status_t status = {0, 0};
+
+}
+                             
+/**
  * @brief Override functions in ops vector
  *
  * This function overrides implemented functions in the ops vector
@@ -889,4 +1161,8 @@ void handle_ops_init(struct fsal_obj_ops *ops)
   ops->rename = newfs_fsal_rename;
   ops->unlink = newfs_fsal_unlink;
   ops->open2 = newfs_fsal_open2;
+  ops->reopen2 = newfs_fsal_reopen2;
+  ops->close2 = newfs_fsal_close2;
+  ops->status2 = newfs_fsal_status2;
+  ops->read2 = newfs_fsal_read2;
 }
