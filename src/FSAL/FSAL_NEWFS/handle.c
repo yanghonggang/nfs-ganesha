@@ -583,6 +583,86 @@ fsal_status_t newfs_fsal_open2(struct fsal_obj_handle *obj_hdl,
     }
     status = newfs_open_my_fd(myself, openflags, posix_flags, my_fd);
 
+    if (FSAL_IS_ERROR(status)) {
+      if (state == NULL) {
+        /* Release the lock taken above, and return
+         * since there is nothing to undo
+         */
+        PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+        return status;
+      } else {
+        /* Error - need to release the share */
+        goto undo_share;
+      }
+    }
+
+    if (createmode >= FSAL_EXCLUSIVE || truncated) {
+      /* Refresh the attributes */
+      rc = newfs_getattr(export->newfs_info, myself->item, &st);
+      if (rc == 0) {
+        LogFullDebug(COMPONENT_FSAL,
+                     "New size = %"PRIx64,
+                     st.st_size);
+      } else {
+        status = newfs2fsal_error(rc);
+      }
+
+      /* Now check verifier for exclusive, but not for
+       * FSAL_EXCLUSIVE_9P.
+       */
+      if (!FSAL_IS_ERROR(status) &&
+          createmode >= FSAL_EXCLUSIVE &&
+          createmode != FSAL_EXCLUSIVE_9P &&
+          !obj_hdl->obj_ops->check_verifier(
+            obj_hdl, verifier)) {
+        /* Verifier didn't match */
+        status = fsalstat(posix2fsal_error(EEXIST), EEXIST);
+      }
+
+      if (attrs_out) {
+        /* Save out new attributes */
+        posix2fsal_attributes_all(&st, attrs_out);
+      }
+    } else if (attrs_out && attrs_out->request_mask &
+               ATTR_RDATTR_ERR) {
+      attrs_out->valid_mask = ATTR_RDATTR_ERR;
+    }
+
+    if (state == NULL) {
+      /* If no state, release the lock taken above and return
+       * status. If success, we haven't done any permission
+       * check so ask the caller to do so.
+       */
+      PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+      *caller_perm_check = !FSAL_IS_ERROR(status);
+      return status;
+    }
+
+    if (!FSAL_IS_ERROR(status)) {
+      /* Return success. We haven't done any permission
+       * check so ask the caller to do so.
+       */
+      *caller_perm_check = true;
+      return status;
+    }
+
+    /* Close on error */
+    (void) newfs_close_my_fd(myself, my_fd);
+
+undo_share:
+    /* Can only get here with status not NULL and an error */
+
+    /* On error we need to release our share reservation
+     * and undo the update of the share counters.
+     * This can block an I/O operation
+     */
+    PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
+
+    update_share_counters(&myself->share, openflags, FSAL_O_CLOSED);
+
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+    return status;
   } /* !name */
 
   /*
@@ -772,7 +852,18 @@ fsal_status_t newfs_fsal_open2(struct fsal_obj_handle *obj_hdl,
 fileerr:
 
   /* Close the file we just opened. */
-  // TODO
+  (void) newfs_close_my_fd(container_of(*new_obj,
+                             struct newfs_handle, handle), my_fd);
+
+  /* Release the handle we just allocated. */
+  (*new_obj)->obj_ops->release(*new_obj);
+  *new_obj = NULL;
+
+  if (created) {
+    /* Remove the file we just created. */
+    newfs_unlink(export->newfs_info, myself->item, name);
+  }
+
   return status;
 }
 
