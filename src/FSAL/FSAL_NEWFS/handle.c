@@ -1068,7 +1068,8 @@ static fsal_status_t newfs_close_func(struct fsal_obj_handle *obj_hdl,
 
 /**
  * @brief Find a file descriptor for a read or write operation.
- * 
+ *
+ * @param[out]	fd		File descriptor	 
  * @param[in]	obj_hdl		File on which to operate
  * @param[in]	bypass		If state doesn't indicate a share reservation,
  *                              bypass any deny read
@@ -1136,9 +1137,201 @@ static void newfs_fsal_read2(struct fsal_obj_handle *obj_hdl,
                              void *caller_arg)
 {
   fsal_status_t status = {0, 0};
+  Fh *my_fd = NULL;
+  bool has_lock = false;
+  bool closefd = false;
+  ssize_t nb_read = 0;
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                  struct newfs_export, export);
+  uint64_t offset = read_arg->offset;
+  struct newfs_fd *newfs_fd = NULL;
+  int i = 0;
 
+  if (read_arg->info != NULL) {
+    /* Currently we don't support READ_PLUS */
+    done_cb(obj_hdl, fsalstat(ERR_FSAL_NOTSUPP, 0), read_arg,
+            caller_arg);
+    return;
+  }
+
+  /* Acquire state's fdlock to prevent OPEN upgrade closing the
+   * file descriptor while we use it.
+   */
+  if (read_arg->state) {
+    newfs_fd = &container_of(read_arg->state, struct newfs_state_fd,
+                             state)->newfs_fd;
+
+    PTHREAD_RWLOCK_rdlock(&newfs_fd->fdlock);
+  }
+
+  /* Get a usable file descriptor */
+  status = newfs_find_fd(&my_fd, obj_hdl, bypass, read_arg->state,
+                         FSAL_O_READ, &has_lock, &closefd, false);
+
+  if (FSAL_IS_ERROR(status))
+    goto out;
+
+  read_arg->io_amount = 0;
+
+  for (i = 0; i < read_arg->iov_count; i++) {
+    nb_read = newfs_read(export->newfs_info, my_fd, offset,
+                         read_arg->iov[i].iov_len,
+                         read_arg->iov[i].iov_base);
+
+    if (nb_read == 0) {
+      read_arg->end_of_file = true;
+      break;
+    } else if (nb_read < 0) {
+      status = newfs2fsal_error(nb_read);
+      goto out;
+    }
+
+    read_arg->io_amount += nb_read;
+    offset += nb_read;
+  }
+
+out:
+  if (newfs_fd)
+    PTHREAD_RWLOCK_unlock(&newfs_fd->fdlock);
+
+  if (closefd)
+    (void) newfs_close(myself->export->newfs_info, my_fd);
+
+  if (has_lock)
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+  done_cb(obj_hdl, status, read_arg, caller_arg);
 }
-                             
+
+/**
+ * @brief Write data to a file
+ *
+ * This function writes data to a file. The FSAL must be able to
+ * perform the write whether a state is presented or not. This function also
+ * is expected to handle properly bypassing or not share reservations. Even
+ * with bypass == true, it will enforce a mandatory (NFSv4) deny_write if
+ * an appropriate state is not passed).
+ *
+ * The FSAL is expected to enforce sync if necessary.
+ *
+ * @param[in]	obj_hdl		File on which to operate
+ * @param[in]	bypass		If state doesn't indicate a share reservation,
+ *                              bypass any non-mandatory deny write
+ * @param[in,out] done_cb	Callback to call when I/O is done
+ * @param[in,out] write_arg	Info about write, passed back in callback
+ * @param[in,out] caller_arg	Opaque arg from the caller for callback
+ */
+
+static void newfs_fsal_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
+                              fsal_async_cb done_cb,
+                              struct fsal_io_arg *write_arg, void *caller_arg)
+{
+
+  struct newfs_fd *newfs_fd = NULL;
+  fsal_status_t status = {0, 0};
+  Fh *my_fd = NULL;
+  bool has_lock = false;
+  bool closefd = false;
+  fsal_openflags_t openflags = FSAL_O_WRITE;
+  int i = 0;
+  int rc = -1;
+  ssize_t nb_written = 0;
+  uint64_t offset = write_arg->offset;
+
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+
+  /* Acquire state's fdlock to prevent OPEN upgrade closing the
+   * file descriptor while we use it.
+   */
+  if (write_arg->state) {
+    newfs_fd = &container_of(write_arg->state, struct newfs_state_fd,
+                             state)->newfs_fd;
+
+    PTHREAD_RWLOCK_rdlock(&newfs_fd->fdlock);
+  }
+
+  /* Get a usable file descriptor */
+  status = newfs_find_fd(&my_fd, obj_hdl, bypass, write_arg->state,
+                         openflags, &has_lock, &closefd, false);
+  if (FSAL_IS_ERROR(status)) {
+    LogDebug(COMPONENT_FSAL,
+             "newfs_find_fd failed %s", msg_fsal_err(status.major));
+    goto out;
+  }
+
+  for (i = 0; i < write_arg->iov_count; i++) {
+    nb_written = newfs_write(export->newfs_info, my_fd, offset,
+                             write_arg->iov[i].iov_len,
+                             write_arg->iov[i].iov_base);
+    if (nb_written == 0) {
+      break;
+    } else if (nb_written < 0) {
+      status = newfs2fsal_error(nb_written);
+      goto out;
+    }
+
+    write_arg->io_amount += nb_written;
+    offset += nb_written;
+  }
+
+  if (write_arg->fsal_stable) {
+    rc = newfs_fsync(export->newfs_info, my_fd, false);
+
+    if (rc < 0) {
+      status = newfs2fsal_error(rc);
+      write_arg->fsal_stable = false;
+    }
+  }
+
+out:
+  if (newfs_fd)
+    PTHREAD_RWLOCK_unlock(&newfs_fd->fdlock);
+
+  if (closefd)
+    (void) newfs_close(myself->export->newfs_info, my_fd);
+
+  if (has_lock)
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+  done_cb(obj_hdl, status, write_arg, caller_arg);
+}
+
+/**
+ * @brief Commit written data
+ *
+ * This function flushes possibly buffered data to a file. This method
+ * differs from commit due to the need to interact with share reservations
+ * and the fact that the FSAL manages the state of "file descriptors". The
+ * FSAL must be able to perform this operation without being passed a specific
+ * state.
+ *
+ * @param[in] obj_hdl		File on which to operate
+ * @param[in] offset		Start of range to commit
+ * @param[in] len 		Length of range to commit
+ *
+ * @return FSAL status.
+ */
+static fsal_status_t newfs_fsal_commit2(struct fsal_obj_handle *obj_hdl,
+                                        off_t offset,
+                                        size_t len)
+{
+  int rc = -1;
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+
+  /* we can avoid opening altogether */ 
+  rc = newfs_sync_item(export->newfs_info, myself->item, 0);
+
+  return newfs2fsal_error(rc);
+}
+
 /**
  * @brief Override functions in ops vector
  *
@@ -1165,4 +1358,6 @@ void handle_ops_init(struct fsal_obj_ops *ops)
   ops->close2 = newfs_fsal_close2;
   ops->status2 = newfs_fsal_status2;
   ops->read2 = newfs_fsal_read2;
+  ops->write2 = newfs_fsal_write2;
+  ops->commit2 = newfs_fsal_commit2;
 }

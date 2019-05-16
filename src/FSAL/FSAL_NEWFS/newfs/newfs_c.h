@@ -82,6 +82,70 @@ int newfs_open(struct newfs_info *fs_info, struct newfs_item *item,
                int flags, Fh **fh);
 int newfs_close(struct newfs_info *fs_info, Fh *fh);
 
+/**
+ * @brief Read data from a file
+ *
+ * This function read data from the given file.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	fh		File descriptor of the file to be read
+ * @param[in]	offset		offset from the start of the file to be read
+ * @param[out]	buf		store data into this buffer
+ *
+ * @return If success, the number of bytes actually read is returned.
+ *         Upon reading end-of-file, zero is returned.
+ *         Otherwrise, a -1 is returned.
+ */ 
+int newfs_read(struct newfs_info *fs_info, Fh *fh, uint64_t offset,
+               uint64_t len, char *buf);
+
+/**
+ * @brief Write data into a file
+ *
+ * This function write data into the given file.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	fh		File descriptor of the file to be written
+ * @param[in]	offset		offset from the start of the file to be written
+ * @param[in]	buf		data is from this buffer
+ *
+ * @return If success, the number of bytes actually were written is returned.
+ *         Zero indicates nothing was written.
+ *         Otherwrise, a -1 is returned.
+ */ 
+int newfs_write(struct newfs_info *fs_info, Fh *fh, uint64_t offset,
+                uint64_t len, char *buf);
+
+/**
+ * @brief Commit buffered modifcation to disk
+ *
+ * This funciton commit all buffered modifications of file metadata and data to disk.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	fh		File descriptor of the file to sync
+ * @param[in]	syncdataonly	only sync data, not include metadata
+ *
+ * @return return 0 on success
+ *         return -1 otherwise.
+ */
+int newfs_fsync(struct newfs_info *fs_info, Fh *fh, int syncdataonly);
+
+/**
+ * @brief Commit buffered modifcation of an item to disk
+ *
+ * This funciton commit all buffered modifications to metadata and data of a 
+ * newfs item to disk.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	item		File descriptor of the item to sync
+ * @param[in]	syncdataonly	only sync data, not include metadata
+ *
+ * @return return 0 on success
+ *         return -1 otherwise.
+ */
+int newfs_sync_item(struct newfs_info *fs_info, struct newfs_item *item,
+                    int syncdataonly);
+ 
 #ifdef __cplusplus
 }
 #endif
