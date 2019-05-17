@@ -451,6 +451,39 @@ static fsal_status_t newfs_close_my_fd(struct newfs_handle *handle,
   return status;
 }
 
+/*
+ * @brief Close a file
+ *
+ * This function closes a file, freeing resources used for read/write
+ * access and releasing capabilities.
+ *
+ * @param[in] obj_hdl File to close
+ *
+ * @return FSAL status.
+ */
+
+static fsal_status_t newfs_fsal_close(struct fsal_obj_handle *obj_hdl)
+{
+  fsal_status_t status;
+
+  struct newfs_handle *handle = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+
+  if (handle->fd.openflags == FSAL_O_CLOSED)
+    return fsalstat(ERR_FSAL_NOT_OPENED, 0);
+
+  /* Take write lock on object to protect file descriptor.
+   * This can block over an I/O operation.
+   */
+  PTHREAD_RWLOCK_wrlock(&obj_hdl->obj_lock);
+
+  status = newfs_close_my_fd(handle, &handle->fd);
+
+  PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+  return status;
+}
+
 /**
  * @brief Open a file descriptor for read or write and possibly create
  *
@@ -1333,6 +1366,227 @@ static fsal_status_t newfs_fsal_commit2(struct fsal_obj_handle *obj_hdl,
 }
 
 /**
+ * @brief Set attributes on an object
+ *
+ * This function sets attributes on an object. Which attributes are
+ * set is determined by attrib_set->valid_mask. The FSAL must manage bypass
+ * or not of share reservations, and a state may be passed.
+ *
+ * @param[in] obj_hdl		File on which to operate
+ * @param[in] state		state_t to use for this operation
+ * @param[in] attrib_set 	Attributes to set
+ */
+static fsal_status_t newfs_fsal_setattr2(struct fsal_obj_handle *obj_hdl,
+                                         bool bypass, struct state_t *state,
+                                         struct attrlist *attrib_set)
+{
+  fsal_status_t status = {0, 0};
+  int rc = -1;
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  bool has_lock = false;
+  bool closefd = false;
+  /* Stat buffer */
+  struct stat st;
+  /* Mask of attributes to set */
+  uint32_t mask = 0;
+
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+  bool reusing_open_state_fd = false;
+
+  if (attrib_set->valid_mask & ~NEWFS_SETTABLE_ATTRIBUTES) {
+    LogDebug(COMPONENT_FSAL,
+             "bad mask %"PRIx64" not settable %"PRIx64,
+             attrib_set->valid_mask,
+             attrib_set->valid_mask & ~NEWFS_SETTABLE_ATTRIBUTES);
+    return fsalstat(ERR_FSAL_INVAL, 0);
+  }
+
+  LogAttrlist(COMPONENT_FSAL, NIV_FULL_DEBUG,
+              "attrs ", attrib_set, false);
+
+  /* apply umask, if mode attribute is to be changed */
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_MODE))
+    attrib_set->mode &=
+      ~op_ctx->fsal_export->exp_ops.fs_umask(op_ctx->fsal_export);
+
+  /* Test if size is being set, make sure file is regular and if so,
+   * require a read/write file descriptor.
+   */
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_SIZE)) {
+    if (obj_hdl->type != REGULAR_FILE) {
+      LogFullDebug(COMPONENT_FSAL,
+                   "Setting size on non-regular file");
+      return fsalstat(ERR_FSAL_INVAL, EINVAL);
+    }
+
+    /* We don't actually need an open fd, we are just doing the
+     * share reservation checking, thus the NULL parameters.
+     */
+    status = fsal_find_fd(NULL, obj_hdl, NULL, &myself->share,
+                          bypass, state, FSAL_O_RDWR, NULL, NULL,
+                          &has_lock, &closefd, false,
+                          &reusing_open_state_fd);
+
+    if (FSAL_IS_ERROR(status)) {
+      LogFullDebug(COMPONENT_FSAL,
+                   "fsal_find_fd status=%s",
+                   fsal_err_txt(status));
+      goto out;
+    }
+  }
+
+  memset(&st, 0, sizeof(struct stat));
+
+  // FIXME: newfs_truncate???
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_SIZE)) {
+    mask |= NEWFS_SETATTR_SIZE;
+    st.st_size = attrib_set->filesize;
+    LogDebug(COMPONENT_FSAL,
+             "setting size to %lu", st.st_size);
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_MODE)) {
+    mask |= NEWFS_SETATTR_MODE;
+    st.st_mode = fsal2unix_mode(attrib_set->mode);
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_OWNER)) {
+    mask |= NEWFS_SETATTR_UID;
+    st.st_uid = attrib_set->owner;
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_GROUP)) {
+    mask |= NEWFS_SETATTR_GID;
+    st.st_gid = attrib_set->group;
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_ATIME)) {
+    mask |= NEWFS_SETATTR_ATIME;
+    st.st_atim = attrib_set->atime;
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_ATIME_SERVER)) {
+    mask |= NEWFS_SETATTR_ATIME;
+    struct timespec timestamp;
+
+    rc = clock_gettime(CLOCK_REALTIME, &timestamp);
+    if (rc != 0) {
+      LogDebug(COMPONENT_FSAL,
+               "clock_gettime returned %s (%d)",
+               strerror(errno), errno);
+      status = fsalstat(posix2fsal_error(errno), errno);
+      st.st_atim = timestamp;
+    }
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_MTIME)) {
+    mask |= NEWFS_SETATTR_MTIME;
+    st.st_mtim = attrib_set->mtime;
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_MTIME_SERVER)) {
+    mask |= NEWFS_SETATTR_MTIME;
+    struct timespec timestamp;
+
+    rc = clock_gettime(CLOCK_REALTIME, &timestamp);
+    if (rc != 0) {
+      LogDebug(COMPONENT_FSAL,
+               "clock_gettime returned %s (%d)",
+               strerror(-rc), -rc);
+      status = newfs2fsal_error(rc);
+      goto out;
+    }
+    st.st_mtim = timestamp;
+  }
+
+  if (FSAL_TEST_MASK(attrib_set->valid_mask, ATTR_CTIME)) {
+    mask |= NEWFS_SETATTR_CTIME;
+    st.st_ctim = attrib_set->ctime;
+  }
+
+  // FIXME: set btime???
+
+  rc = newfs_setattr(export->newfs_info, myself->item, &st, mask);
+  if (rc < 0) {
+    LogDebug(COMPONENT_FSAL,
+             "setattr returned %s (%d)",
+             strerror(-rc), -rc);
+    goto out;
+  } else {
+    /* Success */
+    status = fsalstat(ERR_FSAL_NO_ERROR, 0);
+  }
+out:
+  if (has_lock)
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+  return status;
+}
+
+/**
+ * @brief Write wire handle
+ *
+ * This function writes a 'wire' handle to be sent to clients and
+ * received from the.
+ *
+ * @param[in]	obj_hdl		Handle to digest
+ * @param[in]	output_type	Type of digest requested
+ * @param[in,out] fh_desc	Location/size of buffer for 
+ *                              digest/length modified to digest length
+ *
+ * @return FSAL status.
+ */
+
+static fsal_status_t newfs_fsal_handle_to_wire(
+                       const struct fsal_obj_handle *obj_hdl,
+                       uint32_t output_type,
+                       struct gsh_buffdesc *fh_desc)
+{
+  /* The private 'full' object handle */
+  const struct newfs_handle *handle = container_of(obj_hdl, struct newfs_handle,
+                                                   handle);
+
+  switch (output_type) {
+  case FSAL_DIGEST_NFSV3:
+  case FSAL_DIGEST_NFSV4:
+    if (fh_desc->len < sizeof(struct newfs_handle_key)) {
+      LogMajor(COMPONENT_FSAL,
+               "digest_handle: space to small for handle. Need %zu, have %zu",
+               sizeof(handle->key), fh_desc->len);
+      return fsalstat(ERR_FSAL_TOOSMALL, 0);
+    } else {
+      memcpy(fh_desc->addr, &handle->key, sizeof(struct newfs_handle_key));
+    }
+    break;
+  default:
+    return fsalstat(ERR_FSAL_SERVERFAULT, 0);
+  }
+
+  return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
+
+/**
+ * @brief Give a hash key for file handle
+ *
+ * This function locates a unique hash key for a given file.
+ *
+ * @param[in]	obj_hdl	The file whose key is to be found
+ * @param[out]	fh_desc	Address and length of key
+ */
+static void newfs_fsal_handle_to_key(struct fsal_obj_handle *obj_hdl,
+                                     struct gsh_buffdesc *fh_desc)
+{
+  /* The private 'full' object handle */
+  struct newfs_handle *handle = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+
+  fh_desc->addr = &handle->key;
+  fh_desc->len = sizeof(handle->key);
+}
+
+/**
  * @brief Override functions in ops vector
  *
  * This function overrides implemented functions in the ops vector
@@ -1353,6 +1607,7 @@ void handle_ops_init(struct fsal_obj_ops *ops)
   ops->getattrs = newfs_fsal_getattrs;
   ops->rename = newfs_fsal_rename;
   ops->unlink = newfs_fsal_unlink;
+  ops->close = newfs_fsal_close;
   ops->open2 = newfs_fsal_open2;
   ops->reopen2 = newfs_fsal_reopen2;
   ops->close2 = newfs_fsal_close2;
@@ -1360,4 +1615,7 @@ void handle_ops_init(struct fsal_obj_ops *ops)
   ops->read2 = newfs_fsal_read2;
   ops->write2 = newfs_fsal_write2;
   ops->commit2 = newfs_fsal_commit2;
+  ops->setattr2 = newfs_fsal_setattr2;
+  ops->handle_to_wire = newfs_fsal_handle_to_wire;
+  ops->handle_to_key = newfs_fsal_handle_to_key;
 }

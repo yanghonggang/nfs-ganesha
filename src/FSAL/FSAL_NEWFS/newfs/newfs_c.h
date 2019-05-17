@@ -40,6 +40,17 @@ struct Fh {
 };
 typedef struct Fh Fh;
 
+/* XXX (get|set)attr mask bits */
+#define NEWFS_SETATTR_MODE	(1 << 0)
+/* owner */
+#define NEWFS_SETATTR_UID   	(1 << 1)
+/* group */
+#define NEWFS_SETATTR_GID   	(1 << 2)
+#define NEWFS_SETATTR_MTIME 	(1 << 3)
+#define NEWFS_SETATTR_ATIME 	(1 << 4)
+#define NEWFS_SETATTR_SIZE  	(1 << 5)
+#define NEWFS_SETATTR_CTIME 	(1 << 6)
+
 /* apis*/
 //int newfs_init(const char *cluster_file, struct newfs_info **fs_info);
 //int newfs_fini(struct newfs_info *fs_info);
@@ -68,6 +79,9 @@ int newfs_readdir(struct newfs_info *fs_info, struct newfs_item *parent,
                   struct stat *st);
 int newfs_getattr(struct newfs_info *fs_info, struct newfs_item *item,
                   struct stat *st);
+int newfs_setattr(struct newfs_info *fs_info, struct newfs_item *item,
+                  struct stat *st, uint32_t mask);
+
 // NOTE: http://idocs.umcloud.com:8090/pages/viewpage.action?pageId=8847494
 int newfs_rename(struct newfs_info *fs_info, struct newfs_item *from,
                  const char* old_name, struct newfs_item *to,
@@ -95,7 +109,7 @@ int newfs_close(struct newfs_info *fs_info, Fh *fh);
  * @return If success, the number of bytes actually read is returned.
  *         Upon reading end-of-file, zero is returned.
  *         Otherwrise, a -1 is returned.
- */ 
+ */
 int newfs_read(struct newfs_info *fs_info, Fh *fh, uint64_t offset,
                uint64_t len, char *buf);
 
@@ -112,7 +126,7 @@ int newfs_read(struct newfs_info *fs_info, Fh *fh, uint64_t offset,
  * @return If success, the number of bytes actually were written is returned.
  *         Zero indicates nothing was written.
  *         Otherwrise, a -1 is returned.
- */ 
+ */
 int newfs_write(struct newfs_info *fs_info, Fh *fh, uint64_t offset,
                 uint64_t len, char *buf);
 
@@ -133,7 +147,7 @@ int newfs_fsync(struct newfs_info *fs_info, Fh *fh, int syncdataonly);
 /**
  * @brief Commit buffered modifcation of an item to disk
  *
- * This funciton commit all buffered modifications to metadata and data of a 
+ * This funciton commit all buffered modifications to metadata and data of a
  * newfs item to disk.
  *
  * @param[in]	fs_info		The info used to access all newfs methods
@@ -145,7 +159,7 @@ int newfs_fsync(struct newfs_info *fs_info, Fh *fh, int syncdataonly);
  */
 int newfs_sync_item(struct newfs_info *fs_info, struct newfs_item *item,
                     int syncdataonly);
- 
+
 #ifdef __cplusplus
 }
 #endif

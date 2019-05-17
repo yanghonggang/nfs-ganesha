@@ -43,6 +43,10 @@ struct newfs_state_fd {
   struct newfs_fd newfs_fd;
 };
 
+struct newfs_handle_key {
+  uint64_t ino;
+};
+
 struct newfs_handle {
 	struct fsal_obj_handle handle;		/*< The public handle */
         struct newfs_fd fd;
@@ -53,6 +57,7 @@ struct newfs_handle {
 
 	struct newfs_export* export;		/*< The first export this handle
 						 *< belongs to */
+	struct newfs_handle_key key;		/*< map handle to digest(ino) */
 };
 
 /**
@@ -70,6 +75,21 @@ struct newfs_export {
 	char* cephf_conf;	   /* config file of the backend ceph cluster */
 };
 
+/**
+ * The attributes this FSAL can interpret or supply.
+ *
+ * Currently FSAL_NEWFS uses posix2fsal_attributes, so we should indicate
+ * support for at least those attributes.
+ */
+#define NEWFS_SUPPORTED_ATTRIBUTES ((const attrmask_t) (ATTRS_POSIX))
+
+/**
+ * The attributes this FSAL can set.
+ */
+#define NEWFS_SETTABLE_ATTRIBUTES ((const attrmask_t) (\
+        ATTR_MODE | ATTR_OWNER | ATTR_GROUP | ATTR_ATIME | \
+        ATTR_CTIME | ATTR_MTIME | ATTR_SIZE | ATTR_MTIME_SERVER | \
+        ATTR_ATIME_SERVER))
 
 fsal_status_t newfs2fsal_error(const int newfs_errorcode);
 int construct_handle(struct newfs_export *export, struct newfs_item *item,
