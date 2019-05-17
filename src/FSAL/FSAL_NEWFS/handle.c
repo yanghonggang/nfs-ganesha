@@ -1587,6 +1587,57 @@ static void newfs_fsal_handle_to_key(struct fsal_obj_handle *obj_hdl,
 }
 
 /**
+ * @brief Allocate a state_t structure
+ *
+ * Note that this is not expected to fail since memory allocation is
+ * expected to abort on failure.
+ *
+ * @param[in]	exp_hdl		Export state_t will be associated with
+ * @param[in]	state_type	Type of state to allocate
+ * @param[in]	related_state	Related state if appropriate
+ *
+ * @return s a structure.
+ */
+
+struct state_t *newfs_alloc_state(struct fsal_export *exp_hdl,
+                                  enum state_type state_type,
+                                  struct state_t *related_state)
+{
+  struct state_t *state = NULL;
+  struct newfs_fd *my_fd = NULL;
+
+  state = init_state(gsh_calloc(1, sizeof(struct newfs_state_fd)),
+                     exp_hdl, state_type, related_state);
+
+  my_fd = &container_of(state, struct newfs_state_fd, state)->newfs_fd;
+
+  my_fd->fd = NULL;
+  my_fd->openflags = FSAL_O_CLOSED;
+  PTHREAD_RWLOCK_init(&my_fd->fdlock, NULL);
+
+  return state;
+}
+
+/**
+ * @brief free a newfs_state_fd structure
+ *
+ * @param[in]	exp_hdl	Export state_t associated with
+ * @param[in]	state	Related state if appropriate
+ */
+void newfs_free_state(struct fsal_export *exp_hdl, struct state_t *state)
+{
+  struct newfs_state_fd *state_fd = container_of(state,
+                                                 struct newfs_state_fd,
+                                                 state);
+
+  struct newfs_fd *my_fd = &state_fd->newfs_fd;
+
+  PTHREAD_RWLOCK_destroy(&my_fd->fdlock);
+
+  gsh_free(state_fd);
+}
+
+/**
  * @brief Override functions in ops vector
  *
  * This function overrides implemented functions in the ops vector

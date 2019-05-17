@@ -25,6 +25,7 @@ struct newfs_fsal_module {
 	struct fsal_obj_ops handle_ops;
 	char* ceph_conf_path;
 	char* fdb_conf_path;		/*< foudationdb conf path */
+        //bool init_done;			/*< alreay initialized */
 	/* TODO: FDBDatabase* db */
 };
 extern struct newfs_fsal_module NewFS;
@@ -96,6 +97,11 @@ int construct_handle(struct newfs_export *export, struct newfs_item *item,
                      struct stat *st, struct newfs_handle **obj);
 void deconstruct_handle(struct newfs_handle* obj);
 
+void export_ops_init(struct export_ops *ops);
 void handle_ops_init(struct fsal_obj_ops *ops);
 
+struct state_t *newfs_alloc_state(struct fsal_export *exp_hdl,
+                                  enum state_type state_type,
+                                  struct state_t *related_state);
+void newfs_free_state(struct fsal_export *exp_hdl, struct state_t *state);
 #endif

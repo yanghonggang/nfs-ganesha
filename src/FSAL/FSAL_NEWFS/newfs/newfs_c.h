@@ -2,6 +2,7 @@
 #define _NEWFS_C_H
 
 #include <stdint.h>
+#include <sys/statvfs.h> /* struct statvfs */
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,11 +53,59 @@ typedef struct Fh Fh;
 #define NEWFS_SETATTR_CTIME 	(1 << 6)
 
 /* apis*/
-//int newfs_init(const char *cluster_file, struct newfs_info **fs_info);
-//int newfs_fini(struct newfs_info *fs_info);
+int newfs_init(const char *cluster_file, struct newfs_info **fs_info,
+               const char *root);
+int newfs_fini(struct newfs_info *fs_info);
 
 int newfs_lookup(struct newfs_info *fs_info, struct newfs_item *parent,
                  const char *name, struct newfs_item **out, struct stat *st);
+
+/**
+ * @brief Lookup newfs item by key
+ *
+ * This function lookup a newfs item by its key/ino.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	ino		newfs item's ino
+ * @param[out]	out		returned newfs item 
+ *
+ * @return return 0 on success
+ *         return -1 otherwise.
+ */
+int newfs_lookup_item(struct newfs_info *fs_info, uint64_t ino,
+                      struct newfs_item **out);
+
+/**
+ * @brief Lookup newfs item by key/ino in local item cache
+ *
+ * This function try to find item related to the specified key in
+ * local item cache.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	ino		newfs item's digest(ino)
+ *
+ * @returns Point to newfs_item on success,
+ *          NULL otherwise.
+ */
+struct newfs_item *newfs_get_item(struct newfs_info *fs_info, uint64_t ino);
+
+/**
+ * @brief Find newfs item of the specified path
+ *
+ * This function recursivelly parse the path and return related newfs_item
+ * and stat.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	path		Full path of a newfs dir/file
+ * @param[out]	out		returned newfs item
+ * @param[out]	st		returned stat info
+ *
+ * @return return 0 on success
+ *         return -1 otherwise.
+ */
+int newfs_walk(struct newfs_info *fs_info, const char *path,
+               struct newfs_item **out, struct stat *st);
+
 int newfs_mkdir(struct newfs_info *fs_info, struct newfs_item *parent,
                 const char *name, struct stat *st, struct newfs_item **out);
 int newfs_rmdir(struct newfs_info *fs_info, struct newfs_item *parent,
@@ -159,6 +208,21 @@ int newfs_fsync(struct newfs_info *fs_info, Fh *fh, int syncdataonly);
  */
 int newfs_sync_item(struct newfs_info *fs_info, struct newfs_item *item,
                     int syncdataonly);
+
+/**
+ * @brief Synchronize newfs's metadata and data to disk
+ *
+ * This function commit all buffered modification to the whole newfs to disk.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ *
+ * @return return 0 on success
+ *         return -1 otherwise.
+ */
+int newfs_sync_fs(struct newfs_info *fs_info);
+
+int newfs_statfs(struct newfs_info *fs_info, struct newfs_item *item,
+                 struct statvfs *statvfs);
 
 #ifdef __cplusplus
 }
