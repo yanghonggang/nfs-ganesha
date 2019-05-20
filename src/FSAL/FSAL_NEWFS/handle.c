@@ -1638,6 +1638,266 @@ void newfs_free_state(struct fsal_export *exp_hdl, struct state_t *state)
 }
 
 /**
+ * @brief Get/Release delegation for a file (new style)
+ *
+ * This function qcquires/releases delegation/lease_lock.
+ *
+ * @param[in] obj_hdl	Object owning state
+ * @param[in] state	Open file state to get/release
+ * @param[in] owner	Private owner
+ * @parem[in] deleg	Delegation operation
+ *
+ * @return FSAL status
+ */
+
+static fsal_status_t newfs_fsal_lease_op2(struct fsal_obj_handle *obj_hdl,
+                                          state_t *state, void *owner,
+                                          fsal_deleg_t deleg)
+{
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  fsal_status_t status = {0, 0};
+  int retval = 0;
+  Fh *my_fd = NULL;
+  unsigned int cmd;
+  bool has_lock = false;
+  bool closefd = false;
+  bool bypass = false;
+  fsal_openflags_t openflags = FSAL_O_READ;
+  struct newfs_fd *newfs_fd = NULL;
+
+  switch (deleg) {
+  case FSAL_DELEG_NONE:
+    cmd = NEWFS_DELEGATION_NONE;
+    break;
+  case FSAL_DELEG_RD:
+    cmd = NEWFS_DELEGATION_RD;
+    break;
+  case FSAL_DELEG_WR:
+    cmd = NEWFS_DELEGATION_WR;
+    break;
+  default:
+    LogCrit(COMPONENT_FSAL, "Unknown requested lease state");
+    return newfs2fsal_error(-EINVAL);
+  }
+
+  /* Acquire state's fdlock to prevent OPEN upgrade closing the
+   * file descriptor while we use it.
+   */
+  if (state) {
+    newfs_fd = &container_of(state, struct newfs_state_fd,
+                             state)->newfs_fd;
+    PTHREAD_RWLOCK_rdlock(&newfs_fd->fdlock);
+  }
+
+  /* Get a usable file descriptor */
+  status = newfs_find_fd(&my_fd, obj_hdl, bypass, state, openflags,
+                         &has_lock, &closefd, false);
+
+  if (FSAL_IS_ERROR(status)) {
+    LogCrit(COMPONENT_FSAL, "Unable to find fd for lease op");
+
+    if (newfs_fd)
+      PTHREAD_RWLOCK_unlock(&newfs_fd->fdlock);
+
+    return status;
+  }
+
+  retval = newfs_delegation(myself->export->newfs_info, my_fd, cmd/*,
+                            newfs_deleg_cb*/);
+
+  if (newfs_fd)
+    PTHREAD_RWLOCK_unlock(&newfs_fd->fdlock);
+
+  if (closefd)
+    (void) newfs_close(myself->export->newfs_info, my_fd);
+
+  if (has_lock)
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+  return newfs2fsal_error(retval);
+}
+
+/**
+ * @brief Perform a lock operation
+ *
+ * This function performs a lock operation (lock, unlock, test) on a
+ * file. This method assumes the FSAL is able to support lock owners,
+ * through it need not support asynchronous blocking locks. Passing the
+ * lock stat allow the FSAL to associate information with a specific
+ * lock owner for each file (which may include use of a "file descriptor".
+ *
+ * @param[in]	obj_hdl File on which to operate
+ * @param[in]	state	state_t to use for this operation
+ * @param[in]	owner	Lock owner
+ * @param[in]	lock_op	Operation to perform
+ * @param[in]	request_lock	Lock to take/release/test
+ * @param[in]	conflicting_lock	Conflicting lock
+ *
+ * @return FSAL status.
+ */
+static fsal_status_t newfs_fsal_lock_op2(struct fsal_obj_handle *obj_hdl,
+                                         struct state_t *state, void *owner,
+                                         fsal_lock_op_t lock_op,
+                                         fsal_lock_param_t *request_lock,
+                                         fsal_lock_param_t *conflicting_lock)
+{
+  fsal_status_t status = {0, 0};
+  struct flock lock_args;
+  int retval = 0;
+  Fh *my_fd = NULL;
+  bool has_lock = false;
+  bool closefd = false;
+  bool bypass = false;
+  fsal_openflags_t openflags = FSAL_O_RDWR;
+  struct newfs_fd *newfs_fd = NULL;
+  struct newfs_export *export = container_of(op_ctx->fsal_export,
+                                             struct newfs_export, export);
+  struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,
+                                             handle);
+  LogFullDebug(COMPONENT_FSAL,
+               "Locking: op(%d) type(%d) start(%" PRIu64 ") length(%" PRIu64
+               ")", lock_op, request_lock->lock_type, request_lock->lock_start,
+               request_lock->lock_length);
+
+  if (lock_op == FSAL_OP_LOCKT) {
+    /* test if this lock may be applied */
+    /* We may end up using global fd, don't fail on a deny mode */
+    bypass = true;
+    openflags = FSAL_O_ANY;
+  } else if (lock_op == FSAL_OP_LOCK) {
+    /* request a non-blocking lock */
+    if (request_lock->lock_type == FSAL_LOCK_R)
+      openflags = FSAL_O_READ;
+    else if (request_lock->lock_type == FSAL_LOCK_W)
+      openflags = FSAL_O_WRITE;
+  } else if (lock_op == FSAL_OP_UNLOCK) {
+    /* release a lock */
+    openflags = FSAL_O_ANY;
+  } else {
+    LogDebug(COMPONENT_FSAL,
+             "ERROR: Lock operation requested was not TEST, READ, or WRITE.");
+    return fsalstat(ERR_FSAL_NOTSUPP, 0);
+  }
+
+  if (lock_op != FSAL_OP_LOCKT && state == NULL) {
+    LogCrit(COMPONENT_FSAL, "Non TEST operation with NULL state");
+    return fsalstat(posix2fsal_error(EINVAL), EINVAL);
+  }
+
+  if (request_lock->lock_type == FSAL_LOCK_R) {
+    lock_args.l_type = F_RDLCK;
+  } else if (request_lock->lock_type == FSAL_LOCK_W) {
+    lock_args.l_type = F_WRLCK;
+  } else {
+    LogDebug(COMPONENT_FSAL,
+             "ERROR: The requested lock type was not read or write.");
+    return fsalstat(ERR_FSAL_NOTSUPP, 0);
+  }
+
+  if (lock_op == FSAL_OP_UNLOCK)
+    lock_args.l_type = F_UNLCK;
+
+  lock_args.l_pid = 0;
+  lock_args.l_len = request_lock->lock_length;
+  lock_args.l_start = request_lock->lock_start;
+  lock_args.l_whence = SEEK_SET;
+
+  /* flock.l_len being signed long integer, larger lock ranges may
+   * get mapped to negative values. As per 'man 3 fcntl', posix
+   * locks can accept negative l_len values which may lead to
+   * unlocking an unintened range. Better bail out to prevent that.
+   */
+  if (lock_args.l_len < 0) {
+    LogCrit(COMPONENT_FSAL,
+            "The requested lock length is out of range- lock_args.l_len(%ld),"
+            " reqeust_lock_length(%" PRIu64 ")",
+            lock_args.l_len, request_lock->lock_length);
+    return fsalstat(ERR_FSAL_BAD_RANGE, 0);
+  }
+
+  /* Acquire state's fdlock to prevent OPEN upgrade closing the
+   * file descriptor while we use it.
+   */
+  if (state) {
+    newfs_fd = &container_of(state, struct newfs_state_fd,
+                             state)->newfs_fd;
+    PTHREAD_RWLOCK_rdlock(&newfs_fd->fdlock);
+  }
+
+  /* Get the usable file descriptor */
+  status = newfs_find_fd(&my_fd, obj_hdl, bypass, state, openflags,
+                         &has_lock, &closefd, true);
+
+  if (FSAL_IS_ERROR(status)) {
+    LogCrit(COMPONENT_FSAL, "Unable to find fd for lock operation");
+    return status;
+  }
+
+  if (lock_op == FSAL_OP_LOCKT) {
+    retval = newfs_getlk(export->newfs_info, my_fd, &lock_args,
+                         (uint64_t)owner);
+  } else {
+    retval = newfs_setlk(export->newfs_info, my_fd, &lock_args,
+                         (uint64_t)owner, false);
+  }
+
+  if (retval < 0) {
+    LogDebug(COMPONENT_FSAL,
+             "%s returned %d %s",
+             lock_op == FSAL_OP_LOCKT ? "newfs_getlk" : "newfs_setlk",
+             -retval, strerror(-retval));
+
+    if (conflicting_lock != NULL) {
+      /* Get the conflicting lock */
+      int retval2 = -1;
+      retval2 = newfs_getlk(export->newfs_info, my_fd, &lock_args,
+                            (uint64_t)owner);
+      if (retval2 < 0) {
+        LogCrit(COMPONENT_FSAL,
+                "After failing a lock request, I couldn't even get the "
+                "details of who owns the lock, error %d %s",
+                -retval2, strerror(-retval2));
+        goto err;
+      }
+
+      conflicting_lock->lock_length = lock_args.l_len;
+      conflicting_lock->lock_start = lock_args.l_start;
+      conflicting_lock->lock_type = lock_args.l_type;
+    }
+
+    goto err;
+  }
+
+  /* F_UNLCK is returned then the tested operation would be possible. */
+  if (conflicting_lock != NULL) {
+    if (lock_op == FSAL_OP_LOCKT && lock_args.l_type != F_UNLCK) {
+      conflicting_lock->lock_length = lock_args.l_len;
+      conflicting_lock->lock_start = lock_args.l_start;
+      conflicting_lock->lock_type = lock_args.l_type;
+    } else {
+      conflicting_lock->lock_length = 0;
+      conflicting_lock->lock_start = 0;
+      conflicting_lock->lock_type = FSAL_NO_LOCK;
+    }
+  }
+  /* Fall through (retval == 0) */
+
+err:
+
+  if (newfs_fd)
+    PTHREAD_RWLOCK_unlock(&newfs_fd->fdlock);
+
+  if (closefd)
+    (void) newfs_close(myself->export->newfs_info, my_fd);
+
+  if (has_lock)
+    PTHREAD_RWLOCK_unlock(&obj_hdl->obj_lock);
+
+  return newfs2fsal_error(retval);
+}
+
+/**
  * @brief Override functions in ops vector
  *
  * This function overrides implemented functions in the ops vector
@@ -1669,4 +1929,8 @@ void handle_ops_init(struct fsal_obj_ops *ops)
   ops->setattr2 = newfs_fsal_setattr2;
   ops->handle_to_wire = newfs_fsal_handle_to_wire;
   ops->handle_to_key = newfs_fsal_handle_to_key;
+
+  /* Advanced ops */
+  ops->lease_op2 = newfs_fsal_lease_op2;
+  ops->lock_op2 = newfs_fsal_lock_op2;
 }

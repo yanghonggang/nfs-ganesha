@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <sys/statvfs.h> /* struct statvfs */
+#include <sys/file.h> /* struct flock */
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +52,13 @@ typedef struct Fh Fh;
 #define NEWFS_SETATTR_ATIME 	(1 << 4)
 #define NEWFS_SETATTR_SIZE  	(1 << 5)
 #define NEWFS_SETATTR_CTIME 	(1 << 6)
+
+/* Commands for manipulating delegation state */
+#ifndef NEWFS_DELEGATION_NONE
+#define NEWFS_DELEGATION_NONE	(0)
+#define NEWFS_DELEGATION_RD	(1)
+#define NEWFS_DELEGATION_WR	(2)
+#endif
 
 /* apis*/
 int newfs_init(const char *cluster_file, struct newfs_info **fs_info,
@@ -223,7 +231,24 @@ int newfs_sync_fs(struct newfs_info *fs_info);
 
 int newfs_statfs(struct newfs_info *fs_info, struct newfs_item *item,
                  struct statvfs *statvfs);
+/**
+ * @brief Remove/Request a delegation on an open Fh
+ *
+ * This function commit all buffered modification to the whole newfs to disk.
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	fh		Handle of the open file
+ * @param[in]	cmd		delegation commands
+ *
+ * @return return 0 on success
+ *         return -1 otherwise.
+ */
+int newfs_delegation(struct newfs_info *fs_info, Fh *fh, unsigned int cmd);
 
+int newfs_getlk(struct newfs_info *fs_info, Fh *fh, struct flock *lock_args,
+                uint64_t owner);
+int newfs_setlk(struct newfs_info *fs_info, Fh *fh, struct flock *lock_args,
+                uint64_t owner, bool sleep);
 #ifdef __cplusplus
 }
 #endif

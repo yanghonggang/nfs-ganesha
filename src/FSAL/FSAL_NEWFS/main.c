@@ -82,6 +82,19 @@ static fsal_status_t create_export(struct fsal_module* module_in,
   fsal_export_init(&export->export);
   export_ops_init(&export->export.exp_ops);
 
+  /* get params for this export, if any */
+  if (parse_node) {
+    rc = load_config_from_node(parse_node,
+                               &export_param_block,
+                               export,
+                               true,
+                               err_type);
+    if (rc != 0) {
+     gsh_free(export);
+     return fsalstat(ERR_FSAL_INVAL, 0);
+    }
+  }
+
   /* newfs related init */
   rc = newfs_init(NewFS.fdb_conf_path, &export->newfs_info,
                   op_ctx->ctx_export->fullpath);
@@ -92,18 +105,6 @@ static fsal_status_t create_export(struct fsal_module* module_in,
             op_ctx->ctx_export->fullpath);
   }
 
-  /* get params for this export, if any */
-  if (parse_node) {
-  	rc = load_config_from_node(parse_node,
-  				   &export_param_block,
-  				   export,
-  				   true,
-  				   err_type);
-  	if (rc != 0) {
-  		gsh_free(export);
-  		return fsalstat(ERR_FSAL_INVAL, 0);
-  	}
-  }
   return status;
 }
 
