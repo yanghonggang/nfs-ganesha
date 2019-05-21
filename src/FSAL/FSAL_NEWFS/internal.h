@@ -70,10 +70,9 @@ struct newfs_export {
                                          methods on this export */
 	struct newfs_handle* root; /*< The root handle */
 
-	// FIXME: fdb related members
 	char* user_id; 		   /* cephx user_id for this mount */
 	char* secret_key;	   /* keyring path of ceph user */
-	char* cephf_conf;	   /* config file of the backend ceph cluster */
+//	char* cephf_conf;	   /* config file of the backend ceph cluster */
 };
 
 /**

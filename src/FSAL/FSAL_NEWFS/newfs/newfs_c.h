@@ -113,7 +113,16 @@ struct newfs_item *newfs_get_item(struct newfs_info *fs_info, uint64_t ino);
  */
 int newfs_walk(struct newfs_info *fs_info, const char *path,
                struct newfs_item **out, struct stat *st);
-
+/**
+ * @brief Decrease newfs_item's reference count by 1
+ *
+ * @param[in]	fs_info		The info used to access all newfs methods
+ * @param[in]	i		The newfs_item whose refer counter to decrease
+ *
+ * @return return 0 on success
+ *         return -1 otherwise
+ */
+int newfs_put(struct newfs_info *fs_info, struct newfs_item *i);
 int newfs_mkdir(struct newfs_info *fs_info, struct newfs_item *parent,
                 const char *name, struct stat *st, struct newfs_item **out);
 int newfs_rmdir(struct newfs_info *fs_info, struct newfs_item *parent,

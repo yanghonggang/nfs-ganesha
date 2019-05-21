@@ -39,8 +39,6 @@ static struct config_item export_params[] = {
   CONF_ITEM_STR("user_id", 0, MAXUIDLEN, NULL, newfs_export, user_id),
   CONF_ITEM_STR("secret_access_key", 0, MAXSECRETLEN, NULL, newfs_export,
   		secret_key),
-  CONF_ITEM_STR("cephf_conf", 0, MAXPATHLEN, NULL, newfs_export,
-  		cephf_conf),
   CONFIG_EOL
 };
 
@@ -52,6 +50,53 @@ static struct config_block export_param_block = {
   .blk_desc.u.blk.params = export_params,
   .blk_desc.u.blk.commit = noop_conf_commit
 }; 
+
+static struct config_item newfs_items[] = {
+  CONF_ITEM_PATH("ceph_conf", 1, MAXPATHLEN, NULL,
+                 newfs_fsal_module, ceph_conf_path),
+  CONF_ITEM_PATH("fdb_conf_path", 1, MAXPATHLEN, NULL,
+                 newfs_fsal_module, fdb_conf_path),
+  CONF_ITEM_MODE("umask", 0,
+                 newfs_fsal_module, fsal.fs_info.umask),
+  CONFIG_EOL
+};
+
+static struct config_block newfs_block = {
+  .dbus_interface_name = "org.ganesha.nfsd.config.fsal.newfs",
+  .blk_desc.name = "NEWFS",
+  .blk_desc.type = CONFIG_BLOCK,
+  .blk_desc.u.blk.init = noop_conf_init,
+  .blk_desc.u.blk.params = newfs_items,
+  .blk_desc.u.blk.commit = noop_conf_commit
+};
+
+/* Module methods
+ */
+
+/* init_config
+ * must be called with a reference taken (via lookup_fsal)
+ */
+static fsal_status_t init_config(struct fsal_module *module_in,
+                                 config_file_t config_struct,
+                                 struct config_error_type *err_type)
+{
+  struct newfs_fsal_module *myself = container_of(module_in,
+                                       struct newfs_fsal_module, fsal);
+
+  LogDebug(COMPONENT_FSAL,
+           "NEWFS module setup.");
+
+  (void) load_config_from_parse(config_struct,
+                                &newfs_block,
+                                myself,
+                                true,
+                                err_type);
+  if (!config_error_is_harmless(err_type))
+    return fsalstat(ERR_FSAL_INVAL, 0);
+
+  display_fsinfo(&myself->fsal);
+  return fsalstat(ERR_FSAL_NO_ERROR, 0);
+}
 
 /**
  * @brief Create a new export under this FSAL
@@ -75,8 +120,9 @@ static fsal_status_t create_export(struct fsal_module* module_in,
   struct newfs_handle* handle = NULL;
   /* Return code */
   int rc = 0;
-  
-  handle = handle;
+  struct stat st;
+  struct newfs_item *item;
+ 
   /* TODO: librados related init */
 
   fsal_export_init(&export->export);
@@ -103,8 +149,47 @@ static fsal_status_t create_export(struct fsal_module* module_in,
     LogCrit(COMPONENT_FSAL,
             "Unable to mount NEWFS cluster for %s",
             op_ctx->ctx_export->fullpath);
+    goto error;
   }
 
+  if (fsal_attach_export(module_in, &export->export.exports) != 0) {
+    status.major = ERR_FSAL_SERVERFAULT;
+    LogCrit(COMPONENT_FSAL,
+            "Unable to attach export for %s.",
+            op_ctx->ctx_export->fullpath);
+    goto error;
+  }
+
+  export->export.fsal = module_in;
+  export->export.up_ops = up_ops;
+
+  LogDebug(COMPONENT_FSAL, "NEWFS module export %s.",
+           op_ctx->ctx_export->fullpath);
+
+  rc = newfs_walk(export->newfs_info, "/", &item, &st);
+  if (rc < 0) {
+    status = newfs2fsal_error(rc);
+    goto error;
+  }
+
+  construct_handle(export, item, &st, &handle);
+
+  export->root = handle;
+  op_ctx->fsal_export = &export->export;
+
+  return status;
+
+error:
+  if (item)
+    newfs_put(export->newfs_info, item);
+
+  if (export) {
+    if (export->newfs_info)
+      newfs_fini(export->newfs_info);
+
+    gsh_free(export);
+  }
+ 
   return status;
 }
 
@@ -125,7 +210,8 @@ MODULE_INIT void init(void)
   
   /* override default module operations */
   myself->m_ops.create_export = create_export;
-  
+  myself->m_ops.init_config = init_config;
+
   /* Initialize the fsal_obj_handle ops for FSAL NewFS */
   handle_ops_init(&NewFS.handle_ops);
 }
