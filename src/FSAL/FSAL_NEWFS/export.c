@@ -67,7 +67,7 @@ static fsal_status_t lookup_path(struct fsal_export *export_pub,
   struct newfs_handle *handle = NULL;
   /* Find the actual path in the supplied path */
   const char *realpath = NULL;
-  struct newfs_item *item = NULL;
+  newfs_item *item = NULL;
   struct stat st;
   int rc = -1;
 
@@ -171,7 +171,7 @@ static fsal_status_t create_handle(struct fsal_export *export_pub,
   /* Handle to be created */
   struct newfs_handle *handle = NULL;
   /* newfs item pointer */
-  struct newfs_item *item = NULL;
+  newfs_item *item = NULL;
 
   *pub_handle = NULL;
 

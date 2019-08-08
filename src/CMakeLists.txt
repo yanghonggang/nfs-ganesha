@@ -720,7 +720,14 @@ gopt_test(USE_FSAL_MEM)
 # MEM has no dependencies
 
 gopt_test(USE_FSAL_NEWFS)
-# FIXME
+if (USE_FSAL_NEWFS)
+  message(STATUS ${USE_FSAL_NEWFS_REQUIRED})
+  find_package(NEWFS ${USE_FSAL_NEWFS_REQUIRED})
+  if(NOT NEWFS_FOUND)
+    message(WARNING "Cannot find NEWFS runtime. Disabling NEWFS fsal build")
+    set(USE_FSAL_NEWFS OFF)
+  endif(NOT NEWFS_FOUND)
+endif(USE_FSAL_NEWFS)
 
 # sort out which allocator to use
 if(${ALLOCATOR} STREQUAL "jemalloc")

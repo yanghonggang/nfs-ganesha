@@ -17,7 +17,7 @@
  */
 fsal_status_t newfs2fsal_error(const int newfs_errorcode)
 {
-  fsal_status_t status;
+  fsal_status_t status = {0, 0};
   // FIXME
   return status;
 }
@@ -32,7 +32,7 @@ fsal_status_t newfs2fsal_error(const int newfs_errorcode)
  * @param[in]	export 
  *
  */
-int construct_handle(struct newfs_export *export, struct newfs_item *item,
+int construct_handle(struct newfs_export *export, newfs_item *item,
                      struct stat *st, struct newfs_handle **obj)
 {
   /* Pointer to the handle under construction */

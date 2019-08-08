@@ -121,7 +121,7 @@ static fsal_status_t create_export(struct fsal_module* module_in,
   /* Return code */
   int rc = 0;
   struct stat st;
-  struct newfs_item *item;
+  newfs_item *item;
  
   /* TODO: librados related init */
 

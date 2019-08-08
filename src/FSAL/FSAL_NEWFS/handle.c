@@ -48,7 +48,7 @@ static fsal_status_t newfs_fsal_lookup(struct fsal_obj_handle *dir_hdl,
 {
   int rc;
   struct stat st;
-  struct newfs_item *item;
+  newfs_item *item;
   struct newfs_handle *obj;
 
   struct newfs_export *export = container_of(op_ctx->fsal_export,
@@ -145,7 +145,7 @@ static fsal_status_t newfs_fsal_mkdir(struct fsal_obj_handle *dir_hdl,
                        struct attrlist *attrs_out)
 {
   int rc = -1;
-  struct newfs_item *item = NULL;
+  newfs_item *item = NULL;
   struct newfs_handle *obj = NULL;
   struct stat st;
 
@@ -218,7 +218,7 @@ static fsal_status_t newfs_fsal_readdir(struct fsal_obj_handle *dir_hdl,
   //        we need a newfs_opendir() or we cannot make sure dir's entries
   //        stay the same as the first time newfs_readir()
   while (!(*eof)) {
-    struct newfs_item *item = NULL;
+    newfs_item *item = NULL;
     struct stat st;
     struct dirent de;
     rc = newfs_readdir(export->newfs_info, dir->item, &de, start, &item, &st);
@@ -552,7 +552,7 @@ fsal_status_t newfs_fsal_open2(struct fsal_obj_handle *obj_hdl,
   struct newfs_export *export = container_of(op_ctx->fsal_export,
                                   struct newfs_export, export);
   Fh *fd = NULL;
-  struct newfs_item *item = NULL;
+  newfs_item *item = NULL;
   struct newfs_handle *obj = NULL;
 
   struct newfs_handle *myself = container_of(obj_hdl, struct newfs_handle,

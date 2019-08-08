@@ -10,13 +10,14 @@ SET(fsalnewfs_LIB_SRCS
    internal.h
 )
 
-#message("RGW_INCLUDE_DIR ${RGW_INCLUDE_DIR}")
-#include_directories(${CEPHFS_INCLUDE_DIR})
+message("NEWFS_INCLUDE_DIR ${NEWFS_INCLUDE_DIR}")
+message("NEWFS_LIBRARIES ${NEWFS_LIBRARY}")
+include_directories(${NEWFSFS_INCLUDE_DIR})
 
 add_library(fsalnewfs MODULE ${fsalnewfs_LIB_SRCS})
 add_sanitizers(fsalnewfs)
 
-target_link_libraries(fsalnewfs ${SYSTEM_LIBRARIES})
+target_link_libraries(fsalnewfs ${NEWFS_LIBRARY} ${SYSTEM_LIBRARIES})
 
 set_target_properties(fsalnewfs PROPERTIES VERSION 4.2.0 SOVERSION 4)
 install(TARGETS fsalnewfs COMPONENT fsal DESTINATION ${FSAL_DESTINATION} )

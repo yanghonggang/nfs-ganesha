@@ -51,7 +51,7 @@ struct newfs_handle_key {
 struct newfs_handle {
 	struct fsal_obj_handle handle;		/*< The public handle */
         struct newfs_fd fd;
-        struct newfs_item *item;		/*< newfs-internal file/dir
+        newfs_item *item;			/*< newfs-internal file/dir
                                                     item*/
 	const struct fsal_up_vector* up_ops;	/*< FIXME */
 	struct fsal_share share;		/*< ref: newfs_fsal_merge */
@@ -92,7 +92,7 @@ struct newfs_export {
         ATTR_ATIME_SERVER))
 
 fsal_status_t newfs2fsal_error(const int newfs_errorcode);
-int construct_handle(struct newfs_export *export, struct newfs_item *item,
+int construct_handle(struct newfs_export *export, newfs_item *item,
                      struct stat *st, struct newfs_handle **obj);
 void deconstruct_handle(struct newfs_handle* obj);
 

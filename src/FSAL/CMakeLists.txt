@@ -37,4 +37,4 @@ endif(USE_FSAL_MEM)
 
 if(USE_FSAL_NEWFS)
   add_subdirectory(FSAL_NEWFS)
-endif(NEWFS)
+endif(USE_FSAL_NEWFS)
