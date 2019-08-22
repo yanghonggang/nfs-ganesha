@@ -17,7 +17,7 @@
  */
 fsal_status_t newfs2fsal_error(const int newfs_errorcode)
 {
-  fsal_status_t status = {0, 0};
+  fsal_status_t status = {newfs_errorcode, 0};
   // FIXME
   return status;
 }
